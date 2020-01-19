@@ -1,0 +1,891 @@
+---
+title: "Differential Gene Expression Report"
+author: "NemaMetrix"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+Presented in this report is the visual representation of differential gene expression analysis using CPM normalization from paired end FASTQ read files. This workflow utilizes the Bioconductor EdgeR package to perform the differential gene expression analysis and employs a variety of separate packages to display these results. Files containing FPKM normalized counts and dge quantification lists are outputted in separate files.
+
+```{r install packages, message=FALSE, include=FALSE}
+#Install 
+
+if (!requireNamespace("devtools", quietly = TRUE))
+  install.packages("devtools")
+
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+if(!require(biomaRt)) BiocManager::install("biomaRt")
+if(!require(edgeR)) BiocManager::install("edgeR")
+if(!require(EnhancedVolcano)) BiocManager::install('EnhancedVolcano')
+if(!require(DESeq2)) BiocManager::install("DESeq2")
+if(!require(GO.db)) BiocManager::install("GO.db")
+if(!require(org.Ce.eg.db)) BiocManager::install("org.Ce.eg.db")
+if(!require(VennDiagram)) install.packages("VennDiagram", repos = "http://cran.us.r-project.org")
+if(!require(RColorBrewer)) install.packages("RColorBrewer", repos = "http://cran.us.r-project.org")
+if(!require(formattable)) install.packages("formattable", repos = "http://cran.us.r-project.org")
+
+library(edgeR)
+library(biomaRt)
+library(org.Ce.eg.db)
+library(GO.db)
+library(EnhancedVolcano)
+library(DESeq2)
+library(RColorBrewer)
+library(VennDiagram)
+library(gridExtra)
+library(grid)
+library(formattable)
+
+setwd('.')
+```
+
+```{r read in files, include=FALSE}
+#reading in counts data, removing last 5 lines that don't contain gene counts
+
+GenewiseCounts <- read.table("./merged_counts.tsv", header = TRUE, row.names = 1, sep="\t", check.names = FALSE)
+
+GenewiseCounts <- GenewiseCounts[1:(nrow(GenewiseCounts)-5),]
+
+#setting groups
+conditions <- colnames(GenewiseCounts)
+group <- vector()
+for (cond in conditions) {
+  if (grepl("_A", cond)) {
+    group <- append(group, "group_A")
+  }
+  else if (grepl("_B", cond)) {
+    group <- append(group, "group_B")
+  }
+  else if (grepl("_C", cond)) {
+    group <- append(group, "group_C")
+  }
+  else if (grepl("_D", cond)) {
+    group <- append(group, "group_D")
+  }
+}
+
+#determining number of pairwise comparisons
+if ("group_D" %in% group) {
+  group_num <- 4
+} else if ("group_C" %in% group) {
+  group_num <- 3
+} else if ("group_B" %in% group) {
+  group_num <- 2
+}
+  
+print("The number of condition groups submitted:")
+print(group_num)
+```
+
+### Removing & Reporting rRNA Counts
+
+The table below identifies the number of reads mapping to rRNA encoding genes. These genes are removed from the count matrix prior to analysis so that rRNA counts do not dilute normalization. Other ncRNA genes are not removed in order to enable analysis of these genes.
+
+```{r}
+#removing rRNA genes from count matrix
+
+#known rRNA genes listed in the Ensembl database
+rrna <- c("WBGene00004512",
+"WBGene00004513",
+"WBGene00004567",
+"WBGene00004622",
+"WBGene00014454",
+"WBGene00014472",
+"WBGene00014621",
+"WBGene00077465",
+"WBGene00077466",
+"WBGene00077467",
+"WBGene00077468",
+"WBGene00077469",
+"WBGene00077470",
+"WBGene00077471",
+"WBGene00077472",
+"WBGene00077473",
+"WBGene00077474",
+"WBGene00077475",
+"WBGene00077476",
+"WBGene00077477",
+"WBGene00189966",
+"WBGene00235197")
+rrna_df <- data.frame(rrna)
+merged_df <- merge(GenewiseCounts, rrna_df, by.x = "row.names", by.y = "rrna")
+
+colnames(merged_df)[1] <- "rRNA Gene Name"
+
+print("The raw counts for known rRNA genes are outputted in the following table")
+knitr::kable(merged_df, caption = "Raw rRNA Counts")
+
+GenewiseCounts <- GenewiseCounts[!(rownames(GenewiseCounts) %in% rrna),]
+```
+
+```{r}
+#fetching gene names from biomart using ensembl id
+mart <- useDataset("celegans_gene_ensembl", useMart("ensembl"))
+symbol <- getBM(
+  filters="ensembl_gene_id",
+  attributes=c("ensembl_gene_id", "external_gene_name"),
+  values=rownames(GenewiseCounts),
+  mart=mart)
+```
+
+```{r FPKM, include = FALSE}
+### FPKM 
+length_data <- read.table("GC_lengths.tsv", header = TRUE, row.names=1, sep="\t", check.names = FALSE)
+length_data <- length_data[!(rownames(length_data) %in% rrna),]
+
+colnames <- as.data.frame(group, conditions)
+dds <- DESeqDataSetFromMatrix(countData = GenewiseCounts,
+                              colData = colnames,
+                              design = ~ group)
+length_data$Length <- as.numeric(length_data$Length)
+mcols(dds)$basepairs <- subset(length_data, select=Length)
+#rowRanges(dds) <- GRangesList(list(length_data$Length))
+
+#FPM values
+fpm_data <- fpm(dds)
+#FPKM values
+merged_data <- merge(fpm_data, length_data, by=0, sort = TRUE)
+rownames(merged_data) <- merged_data[,1]
+merged_data = as.data.frame(subset(merged_data, select = -c(Row.names) ))
+merged_data$Length <- merged_data$Length/1000
+merged_data[,1:6]<-merged_data[,1:6]/merged_data[,7]
+
+#swapping gene symbol in for ensembl id
+row.names(merged_data) <- symbol$external_gene_name
+
+#write out to a file the FPKM
+write.table(merged_data[,1:6], file="FPKM_gene_data.tsv", sep="\t")
+```
+  
+```{r DGE, include=FALSE}
+#creating DGE object, getting dispersion, fitting generalized linear model, and identifying gene names for each ensembl id
+
+#setting dif gene expression list and normalizing
+dge.er <- DGEList(counts=GenewiseCounts)
+dge.er <- calcNormFactors(dge.er)
+
+#setting design variable
+design.er <- model.matrix(~0 + group)
+
+#running all dispersion options
+dge.er <- estimateGLMCommonDisp(dge.er, design.er)
+dge.er <- estimateGLMTrendedDisp(dge.er, design.er)
+dge.er <- estimateGLMTagwiseDisp(dge.er, design.er)
+
+#fitting a negative binomial generalized log-linear model
+fit.er <- glmFit(dge.er, design.er)
+```
+
+## Differential Gene Expression Figures 
+
+Below are three types of differential gene expression visualizations. Using EdgeR, differential gene expression was determined using false likeleyhood ratio tests based on fitting linear models. The likehood ratios were used to determine the p-values which were subsequently corrected for with a false discovery rate which then dictated statistical significance of differential expression between groups. 
+
+## Venn Diagrams
+
+These diagrams contain the number of differentially expressed genes found during the comparison of two of the treatment groups. The overlapping regions are the genes found to be differentially expressed in one or more of the comparisons. Only 3-way group comparisons will output a venn diagram as 2-way and 4-way diagrams are not possible
+
+```{r venn diagram 3 treats, fig.height = 7, fig.width = 7, message=FALSE, echo=FALSE}
+#3 groups
+#specifying contrasts, normalizing data, liklihood ratio tests, adding gene names, and producing venn diagram
+
+if (group_num == 3){
+  
+  #setting all contrasts for DGE (including GO)
+  contrasts <- makeContrasts(A_vs_B=groupgroup_A-groupgroup_B, A_vs_C=groupgroup_A-groupgroup_C, B_vs_C=groupgroup_B-groupgroup_C, levels=design.er)
+  
+  #conducting likelihood ratio tests for each pairwise comparison
+  A_vs_B_lrt <- glmLRT(fit.er, contrast=contrasts[,"A_vs_B"])
+  A_vs_C_lrt <- glmLRT(fit.er, contrast=contrasts[,"A_vs_C"])
+  B_vs_C_lrt <- glmLRT(fit.er, contrast=contrasts[,"B_vs_C"])
+  
+  #swapping gene symbol in for ensembl id
+  row.names(A_vs_B_lrt$table) <- symbol$external_gene_name
+  row.names(A_vs_C_lrt$table) <- symbol$external_gene_name
+  row.names(B_vs_C_lrt$table) <- symbol$external_gene_name
+  
+  #identifying significantly expressed genes based off of trusted edgeR p-values and stats
+  A_vs_B_de <- decideTestsDGE(A_vs_B_lrt, adjust.method = "fdr")
+  A_vs_C_de <- decideTestsDGE(A_vs_C_lrt, adjust.method = "fdr")
+  B_vs_C_de <- decideTestsDGE(B_vs_C_lrt, adjust.method = "fdr")
+  
+  #heatmap normalization, gene name fetching, and pairwise fetching
+  #creating logCPM table containing all samples to be used for heat maps
+  logCPM <- cpm(dge.er, prior.count=2, log=TRUE)
+  
+  #swapping in gene symbol for ensembl ID
+  row.names(logCPM) <- symbol$external_gene_name
+
+  #subsetting each pairwise comparison
+  logCPM_A_vs_B <- logCPM[,grepl("_A|_B", colnames(logCPM))]
+  logCPM_A_vs_C <- logCPM[,grepl("_A|_C", colnames(logCPM))]
+  logCPM_B_vs_C <- logCPM[,grepl("_B|_C", colnames(logCPM))]
+  
+  ### VENN DIAGRAM
+  print("Three way venn diagram comparison of pair wise differentially expressed genes between three group groups.")
+  sub_1 <- subset(A_vs_B_de, A_vs_B_de[,1] > 0)
+  sub_2 <- subset(A_vs_C_de, A_vs_C_de[,1] > 0)
+  sub_3 <- subset(B_vs_C_de, B_vs_C_de[,1] > 0)
+  row.names(sub_3)
+  
+  myCol <- brewer.pal(3, "Pastel2")
+  futile.logger::flog.threshold(futile.logger::ERROR, name = "VennDiagramLogger")
+  ve <- venn.diagram(x=list(row.names(sub_1), row.names(sub_2), row.names(sub_3)),
+             category.names = c("Group A vs Group B" , "Group A vs Group C" , "Group B vs Group C"),
+             filename = NULL,
+             scaled = TRUE,
+             output = TRUE,
+             
+             # Output features
+             imagetype="png",
+             height = 200, 
+             width = 300, 
+             resolution = 300,
+             compression = "lzw",
+             
+             # Circles
+             lwd = 2,
+             lty = 'blank',
+             fill = myCol,
+             
+             # Numbers
+             cex = 2,
+             fontface = "bold",
+             fontfamily = "sans",
+             
+             # Set names
+             cat.cex = 1,
+             cat.fontface = "bold",
+             cat.default.pos = "outer",
+             cat.pos = c(-27, 27, 135),
+             cat.dist = c(0.055, 0.055, 0.085),
+             cat.fontfamily = "sans",
+             rotation = 1)
+  grid.newpage()
+  grid.draw(ve)
+}
+```
+
+```{r no venn diagram 2 treats, fig.height = 7, fig.width = 7, message=FALSE, echo=FALSE}
+#2 groups
+#specifying contrasts, normalizing data, liklihood ratio tests, adding gene names, and producing venn diagram
+
+if (group_num == 2) {
+  
+  print("In a 2-way comparison, a venn diagram is not outputted.")
+  
+  #setting all contrasts for DGE (including GO)
+  contrasts <- makeContrasts(A_vs_B=groupgroup_A-groupgroup_B,levels=design.er)
+  
+  #conducting likelihood ratio tests for each pairwise comparison
+  A_vs_B_lrt <- glmLRT(fit.er, contrast=contrasts[,"A_vs_B"])
+  
+  #swapping gene symbol in for ensembl id
+  row.names(A_vs_B_lrt$table) <- symbol$external_gene_name
+  
+  #identifying significantly expressed genes based off of trusted edgeR p-values and stats
+  A_vs_B_de <- decideTestsDGE(A_vs_B_lrt, adjust.method = "fdr")
+  
+  #heatmap normalization, gene name fetching, and pairwise fetching
+  #creating logCPM table containing all samples to be used for heat maps
+  logCPM <- cpm(dge.er, prior.count=2, log=TRUE)
+  #swapping in gene symbol for ensembl ID
+  row.names(logCPM) <- symbol$external_gene_name
+
+  #subsetting each pairwise comparison
+  logCPM_A_vs_B <- logCPM[,grepl("_A|_B", colnames(logCPM))]
+}
+```
+
+```{r no venn diagram 4 treats, fig.height = 7, fig.width = 7, message=FALSE, echo=FALSE}
+#4 groups
+#specifying contrasts, normalizing data, liklihood ratio tests, adding gene names
+
+if (group_num == 4) {
+  
+  print("In a 4-way comparison, a venn diagram is not outputted.")
+  
+  #setting all contrasts for DGE (including GO)
+  contrasts <- makeContrasts(A_vs_B=groupgroup_A-groupgroup_B, A_vs_C=groupgroup_A-groupgroup_C, B_vs_C=groupgroup_B-groupgroup_C, A_vs_D=groupgroup_A-groupgroup_D, B_vs_D=groupgroup_B-groupgroup_D, C_vs_D=groupgroup_C-groupgroup_D,levels=design.er)
+  
+  #conducting likelihood ratio tests for each pairwise comparison
+  A_vs_B_lrt <- glmLRT(fit.er, contrast=contrasts[,"A_vs_B"])
+  A_vs_C_lrt <- glmLRT(fit.er, contrast=contrasts[,"A_vs_C"])
+  B_vs_C_lrt <- glmLRT(fit.er, contrast=contrasts[,"B_vs_C"])
+  A_vs_D_lrt <- glmLRT(fit.er, contrast=contrasts[,"A_vs_D"])
+  B_vs_D_lrt <- glmLRT(fit.er, contrast=contrasts[,"B_vs_D"])
+  C_vs_D_lrt <- glmLRT(fit.er, contrast=contrasts[,"C_vs_D"])
+  
+  #swapping gene symbol in for ensembl id
+  row.names(A_vs_B_lrt$table) <- symbol$external_gene_name
+  row.names(A_vs_C_lrt$table) <- symbol$external_gene_name
+  row.names(B_vs_C_lrt$table) <- symbol$external_gene_name
+  row.names(A_vs_D_lrt$table) <- symbol$external_gene_name
+  row.names(B_vs_D_lrt$table) <- symbol$external_gene_name
+  row.names(C_vs_D_lrt$table) <- symbol$external_gene_name
+  
+  #identifying significantly expressed genes based off of trusted edgeR p-values and stats
+  A_vs_B_de <- decideTestsDGE(A_vs_B_lrt, adjust.method = "fdr")
+  A_vs_C_de <- decideTestsDGE(A_vs_C_lrt, adjust.method = "fdr")
+  B_vs_C_de <- decideTestsDGE(B_vs_C_lrt, adjust.method = "fdr")
+  A_vs_D_de <- decideTestsDGE(A_vs_D_lrt, adjust.method = "fdr")
+  B_vs_D_de <- decideTestsDGE(B_vs_D_lrt, adjust.method = "fdr")
+  C_vs_D_de <- decideTestsDGE(C_vs_D_lrt, adjust.method = "fdr")
+  
+  #heatmap normalization, gene name fetching, and pairwise fetching
+  #creating logCPM table containing all samples to be used for heat maps
+  logCPM <- cpm(dge.er, prior.count=2, log=TRUE)
+  #swapping in gene symbol for ensembl ID
+  row.names(logCPM) <- symbol$external_gene_name
+
+  #subsetting each pairwise comparison
+  logCPM_A_vs_B <- logCPM[,grepl("_A|_B", colnames(logCPM))]
+  logCPM_A_vs_C <- logCPM[,grepl("_A|_C", colnames(logCPM))]
+  logCPM_B_vs_C <- logCPM[,grepl("_B|_C", colnames(logCPM))]
+  logCPM_A_vs_D <- logCPM[,grepl("_A|_D", colnames(logCPM))]
+  logCPM_B_vs_D <- logCPM[,grepl("_B|_D", colnames(logCPM))]
+  logCPM_C_vs_D <- logCPM[,grepl("_C|_D", colnames(logCPM))]
+}
+```
+
+### Volcano Plots and Heatmaps
+
+The volcano plots shown below depict a scatterplot that shows statistical significance (P value) versus magnitude of change (fold change). The magnitude of change for the presented plots used log2 fold change. This allows the proportions of the groups being compared to stay relative to one another and allow for the most accurate statistical significance comparisons.
+
+The heatmaps shown in tandem with the volcano plots are based on raw CPM normalized counts and are created via heiarchical clustering. The 30 genes shown in the heat map are the top 30 most statistically significant differentially expressed based on P values from the gene data tables. This shows the absolute expression in log2 of each replicate and is useful in examining replicability and getting an initial idea of the differences in expression between groups.
+
+```{r three treat volcano and heatmap A vs B, fig.height = 7, fig.width = 7, message=FALSE, echo=FALSE}
+if (group_num == 3) {
+  
+  #HEATMAP
+  print("Heatmap group A vs. group B, Differential Expression.")
+  o1 <- order(A_vs_B_lrt$table$PValue)
+  logCPM_A_vs_B <- logCPM_A_vs_B[o1[1:30],]
+  coolmap(logCPM_A_vs_B, show.dendrogram = "none", 
+            margins = c(8,8), cexRow=0.75, cexCol=1, srtCol=45, cluster.by = "expression level", col="redblue")
+  
+  #VOLCANO
+  #pval = .00001
+  #lfc = 1
+  print("Volcano Plot - group A vs. group B")
+  print(EnhancedVolcano(A_vs_B_lrt$table, FCcutoff = 1, x = "logFC", y = "PValue", lab=rownames(A_vs_B_lrt$table), title="Group A vs Group B", subtitle="+log2fc favors Group A"))
+}
+
+```
+```{r}
+if (group_num == 3) {
+  #getting table of values listed as significant in the volcano plot
+  FC_sub_A_B <- subset(A_vs_B_lrt$table, abs(logFC) >= 1)
+  P_FC_sub_A_B <- subset(FC_sub_A_B, PValue <= 0.00001)
+  write.table(A_vs_B_lrt$table,"A_vs_B_l2fc_values.txt",sep="\t",row.names=TRUE)
+  knitr::kable(P_FC_sub_A_B[order(P_FC_sub_A_B$PValue),], caption = "group A vs group B, Significantly Differential Expressed genes shown in volcano plot")
+}
+```
+
+```{r two treat volcano and heatmap A vs B, fig.height = 7, fig.width = 7, message=FALSE, echo=FALSE}
+if (group_num == 2) {
+  
+  #HEATMAP
+  print("Heatmap group A vs. group B, Differential Expression.")
+  o1 <- order(A_vs_B_lrt$table$PValue)
+  logCPM_A_vs_B <- logCPM_A_vs_B[o1[1:30],]
+  coolmap(logCPM_A_vs_B, show.dendrogram = "none", 
+            margins = c(8,8), cexRow=0.75, cexCol=1, srtCol=45, cluster.by = "expression level", col="redblue")
+  
+  #VOLCANO
+  #pval = .00001
+  #lfc = 1
+  print("Volcano Plot - group A vs. group B")
+  print(EnhancedVolcano(A_vs_B_lrt$table, FCcutoff = 1, x = "logFC", y = "PValue", lab=rownames(A_vs_B_lrt$table), title="Group A vs Group B", subtitle="+log2fc favors Group A"))
+}
+```
+```{r}
+if (group_num == 2) {
+  #getting table of values listed as significant in the volcano plot
+  FC_sub_A_B <- subset(A_vs_B_lrt$table, abs(logFC) >= 1)
+  P_FC_sub_A_B <- subset(FC_sub_A_B, PValue <= 0.00001)
+  write.table(A_vs_B_lrt$table,"A_vs_B_l2fc_values.txt",sep="\t",row.names=TRUE)
+  knitr::kable(P_FC_sub_A_B[order(P_FC_sub_A_B$PValue),], caption = "group A vs group B, Significantly Differential Expressed genes shown in volcano plot")
+}
+```
+
+```{r four treat volcano and heatmap A vs B, fig.height = 7, fig.width = 7, message=FALSE, echo=FALSE}
+if (group_num == 4) {
+  
+  #HEATMAP
+  print("Heatmap group A vs. group B, Differential Expression.")
+  o1 <- order(A_vs_B_lrt$table$PValue)
+  logCPM_A_vs_B <- logCPM_A_vs_B[o1[1:30],]
+  coolmap(logCPM_A_vs_B, show.dendrogram = "none", 
+            margins = c(8,8), cexRow=0.75, cexCol=1, srtCol=45, cluster.by = "expression level", col="redblue")
+  
+  #VOLCANO
+  #pval = .00001
+  #lfc = 1
+  print("Volcano Plot - group A vs. group B")
+  print(EnhancedVolcano(A_vs_B_lrt$table, FCcutoff = 1, x = "logFC", y = "PValue", lab=rownames(A_vs_B_lrt$table), title="Group A vs Group B", subtitle="+log2fc favors Group A"))
+}
+```
+```{r}
+if (group_num == 4) {
+  #getting table of values listed as significant in the volcano plot
+  FC_sub_A_B <- subset(A_vs_B_lrt$table, abs(logFC) >= 1)
+  P_FC_sub_A_B <- subset(FC_sub_A_B, PValue <= 0.00001)
+  write.table(A_vs_B_lrt$table,"A_vs_B_l2fc_values.txt",sep="\t",row.names=TRUE)
+  knitr::kable(P_FC_sub_A_B[order(P_FC_sub_A_B$PValue),], caption = "group A vs group B, significantly differential expressed genes")
+}
+```
+
+```{r three treat A vs C volcano and heatmap, fig.height = 7, fig.width = 7, message= FALSE, echo=FALSE}
+#NEXT COMPARISON---------
+if (group_num == 3) {
+  
+  #HEATMAP
+  print("Heatmap, group A vs group C, sig. diff. expressed genes")
+  o2 <- order(A_vs_C_lrt$table$PValue)
+  logCPM_A_vs_C <- logCPM_A_vs_C[o2[1:30],]
+  coolmap(logCPM_A_vs_C, show.dendrogram = "none",
+          margins = c(8,8), cexRow=0.75, cexCol=1, srtCol=45, cluster.by = "expression level", col="redblue")
+  
+  #VOLCANO
+  #pval = .00001
+  #lfc = 1
+  print("Volcano Plot, group A vs group C")
+  print(EnhancedVolcano(A_vs_C_lrt$table, FCcutoff = 1, x = "logFC", y = "PValue", lab=rownames(A_vs_C_lrt$table), title="Group A vs Group C", subtitle="+log2fc favors Group A"))
+}
+```
+```{r}
+if (group_num == 3) {
+  #getting table of values listed as significant in the volcano plot
+  FC_sub_A_C <- subset(A_vs_C_lrt$table, abs(logFC) >= 1)
+  P_FC_sub_A_C <- subset(FC_sub_A_C, PValue <= 0.00001)
+  write.table(A_vs_C_lrt$table,"A_vs_C_l2fc_values.txt",sep="\t",row.names=TRUE)
+  knitr::kable(P_FC_sub_A_C[order(P_FC_sub_A_C$PValue),], caption = "group A vs group C, significantly differentially expressed genes")
+ }
+```
+
+```{r four treat A vs C volcano and heatmap, fig.height = 7, fig.width = 7, message= FALSE, echo=FALSE}
+#NEXT COMPARISON---------
+if (group_num == 4) {
+  
+  #HEATMAP
+  print("Heatmap, group A vs group C, sig. diff. expressed genes")
+  o2 <- order(A_vs_C_lrt$table$PValue)
+  logCPM_A_vs_C <- logCPM_A_vs_C[o2[1:30],]
+  coolmap(logCPM_A_vs_C, show.dendrogram = "none",
+          margins = c(8,8), cexRow=0.75, cexCol=1, srtCol=45, cluster.by = "expression level", col="redblue")
+  
+  #VOLCANO
+  #pval = .00001
+  #lfc = 1
+  print("Volcano Plot, group A vs group C")
+  print(EnhancedVolcano(A_vs_C_lrt$table, FCcutoff = 1, x = "logFC", y = "PValue", lab=rownames(A_vs_C_lrt$table), title="Group A vs Group C", subtitle="+log2fc favors Group A"))
+}
+```
+```{r}
+if (group_num == 4) {
+  #getting table of values listed as significant in the volcano plot
+  FC_sub_A_C <- subset(A_vs_C_lrt$table, abs(logFC) >= 1)
+  P_FC_sub_A_C <- subset(FC_sub_A_C, PValue <= 0.00001)
+  write.table(A_vs_C_lrt$table,"A_vs_C_l2fc_values.txt",sep="\t",row.names=TRUE)
+  knitr::kable(P_FC_sub_A_C[order(P_FC_sub_A_C$PValue),], caption = "group A vs group C, significantly differentially expressed genes")
+ }
+```
+
+```{r three variables b vs c volcano and heatmap, fig.height = 7, fig.width = 7, message=FALSE, echo=FALSE}
+
+#NEXT COMPARISON---------
+if (group_num == 3) { 
+  
+  #HEATMAP
+  print("Heatmap, group B vs C, sig. Diff. expressed genes")
+  o3 <- order(B_vs_C_lrt$table$PValue)
+  logCPM_B_vs_C <- logCPM_B_vs_C[o3[1:30],]
+  coolmap(logCPM_B_vs_C, show.dendrogram = "none",
+          margins = c(8,8), cexRow=0.75, cexCol=1, srtCol=45, cluster.by = "expression level", col="redblue")
+  
+  #VOLCANO
+  #pval = .00001
+  #lfc = 1
+  print("Volcano Plot, group B vs group C, sig. diff. expressed genes")
+  print(EnhancedVolcano(B_vs_C_lrt$table, FCcutoff = 1, x = "logFC", y = "PValue", lab=rownames(B_vs_C_lrt$table), title="Group B vs Group C", subtitle="+log2fc favors Group B"))
+}
+```
+```{r}
+if (group_num == 3) { 
+  #getting table of values listed as significant in the volcano plot
+  FC_sub_B_C <- subset(B_vs_C_lrt$table, abs(logFC) >= 1)
+  P_FC_sub_B_C <- subset(FC_sub_B_C, PValue <= 0.00001)
+  write.table(B_vs_C_lrt$table,"B_vs_C_l2fc_values.txt",sep="\t",row.names=TRUE)
+  knitr::kable(P_FC_sub_B_C[order(P_FC_sub_B_C$PValue),], caption = "group B vs group C, significantly differentially expressed genes")
+}
+```
+
+```{r four variables b vs c volcano and heatmap, fig.height = 7, fig.width = 7, message=FALSE, echo=FALSE}
+
+#NEXT COMPARISON---------
+if (group_num == 4) { 
+    
+  #HEATMAP
+  print("Heatmap, group B vs C, sig. Diff. expressed genes")
+  o3 <- order(B_vs_C_lrt$table$PValue)
+  logCPM_B_vs_C <- logCPM_B_vs_C[o3[1:30],]
+  coolmap(logCPM_B_vs_C, show.dendrogram = "none",
+          margins = c(8,8), cexRow=0.75, cexCol=1, srtCol=45, cluster.by = "expression level", col="redblue")
+  
+  #VOLCANO
+  #pval = .00001
+  #lfc = 1
+  print("Volcano Plot, group B vs group C, sig. diff. expressed genes")
+  print(EnhancedVolcano(B_vs_C_lrt$table, FCcutoff = 1, x = "logFC", y = "PValue", lab=rownames(B_vs_C_lrt$table), title="Group B vs Group C", subtitle="+log2fc favors Group B"))
+}
+```
+```{r}
+if (group_num == 4) { 
+  #getting table of values listed as significant in the volcano plot
+  FC_sub_B_C <- subset(B_vs_C_lrt$table, abs(logFC) >= 1)
+  P_FC_sub_B_C <- subset(FC_sub_B_C, PValue <= 0.00001)
+  write.table(B_vs_C_lrt$table,"B_vs_C_l2fc_values.txt",sep="\t",row.names=TRUE)
+  knitr::kable(P_FC_sub_B_C[order(P_FC_sub_B_C$PValue),], caption = "group B vs group C, significantly differentially expressed genes")
+}
+```
+
+```{r three variables a vs d volcano and heatmap, fig.height = 7, fig.width = 7, message=FALSE, echo=FALSE}
+
+#NEXT COMPARISON---------
+if (group_num == 4) { 
+    
+  #HEATMAP
+  print("Heatmap, group A vs D, sig. diff. expressed genes")
+  o4 <- order(A_vs_D_lrt$table$PValue)
+  logCPM_A_vs_D <- logCPM_A_vs_D[o4[1:30],]
+  coolmap(logCPM_A_vs_D, show.dendrogram = "none",
+          margins = c(8,8), cexRow=0.75, cexCol=1, srtCol=45, cluster.by = "expression level", col="redblue")
+  
+  #VOLCANO
+  #pval = .00001
+  #lfc = 1
+  print("Volcano Plot, group A vs group D, sig. diff. expressed genes")
+  print(EnhancedVolcano(A_vs_D_lrt$table, FCcutoff = 1, x = "logFC", y = "PValue", lab=rownames(A_vs_D_lrt$table), title="Group A vs Group D", subtitle="+log2fc favors Group A"))
+}
+```
+```{r}
+if (group_num == 4) { 
+  #getting table of values listed as significant in the volcano plot
+  FC_sub_A_D <- subset(A_vs_D_lrt$table, abs(logFC) >= 1)
+  P_FC_sub_A_D <- subset(FC_sub_A_D, PValue <= 0.00001)
+  write.table(A_vs_D_lrt$table,"A_vs_D_l2fc_values.txt",sep="\t",row.names=TRUE)
+  knitr::kable(P_FC_sub_A_D[order(P_FC_sub_A_D$PValue),], caption = "group A vs group D, significantly differentially expressed genes")
+}
+```
+
+```{r three variables b vs d volcano and heatmap, fig.height = 7, fig.width = 7, message=FALSE, echo=FALSE}
+
+#NEXT COMPARISON---------
+if (group_num == 4) { 
+    
+  #HEATMAP
+  print("Heatmap, group B vs D, sig. diff. expressed genes")
+  o5 <- order(B_vs_D_lrt$table$PValue)
+  logCPM_B_vs_D <- logCPM_B_vs_D[o5[1:30],]
+  coolmap(logCPM_B_vs_D, show.dendrogram = "none",
+          margins = c(8,8), cexRow=0.75, cexCol=1, srtCol=45, cluster.by = "expression level", col="redblue")
+  
+  #VOLCANO
+  #pval = .00001
+  #lfc = 1
+  print("Volcano Plot, group B vs group D, sig. diff. expressed genes")
+  print(EnhancedVolcano(A_vs_D_lrt$table, FCcutoff = 1, x = "logFC", y = "PValue", lab=rownames(B_vs_D_lrt$table), title="Group B vs Group D", subtitle="+log2fc favors Group B"))
+}
+```
+```{r}
+if (group_num == 4) { 
+  #getting table of values listed as significant in the volcano plot
+  FC_sub_B_D <- subset(B_vs_D_lrt$table, abs(logFC) >= 1)
+  P_FC_sub_B_D <- subset(FC_sub_B_D, PValue <= 0.00001)
+  write.table(B_vs_D_lrt$table,"B_vs_D_l2fc_values.txt",sep="\t",row.names=TRUE)
+  knitr::kable(P_FC_sub_B_D[order(P_FC_sub_B_D$PValue),], caption = "group B vs group D, significantly differentially expressed genes")
+}
+```
+
+```{r three variables c vs d volcano and heatmap, fig.height = 7, fig.width = 7, message=FALSE, echo=FALSE}
+
+#NEXT COMPARISON---------
+if (group_num == 4) { 
+    
+  #HEATMAP
+  print("Heatmap, group C vs D, sig. diff. expressed genes")
+  o6 <- order(C_vs_D_lrt$table$PValue)
+  logCPM_C_vs_D <- logCPM_C_vs_D[o6[1:30],]
+  coolmap(logCPM_C_vs_D, show.dendrogram = "none",
+          margins = c(8,8), cexRow=0.75, cexCol=1, srtCol=45, cluster.by = "expression level", col="redblue")
+  
+  #VOLCANO
+  #pval = .00001
+  #lfc = 1
+  print("Volcano Plot, group C vs group D, sig. diff. expressed genes")
+  print(EnhancedVolcano(C_vs_D_lrt$table, FCcutoff = 1, x = "logFC", y = "PValue", lab=rownames(C_vs_D_lrt$table), title="Group C vs Group D", subtitle="+log2fc favors Group C"))
+}
+```
+```{r}
+if (group_num == 4) { 
+  #getting table of values listed as significant in the volcano plot
+  FC_sub_C_D <- subset(C_vs_D_lrt$table, abs(logFC) >= 1)
+  P_FC_sub_C_D <- subset(FC_sub_C_D, PValue <= 0.00001)
+  write.table(C_vs_D_lrt$table,"C_vs_D_l2fc_values.txt",sep="\t",row.names=TRUE)
+  knitr::kable(P_FC_sub_C_D[order(P_FC_sub_C_D$PValue),], caption = "group C vs group D, significantly differentially expressed genes")
+}
+```
+
+## Gene Ontology Analysis
+
+Gene Ontology helps contextualize differential gene expression by connecting genes with their functions. This analysis helps indicate what functions are changing as counts are changing and gives relevance to the genes themselves. The GO tables are organized by P value in ascending order, with the most significant P value being displayed first. The GO tables contain "up" and "down" columns. The "up" column refers to the group listed first and "down" refers to the group listed second (i.e. Group A vs Group B, Group A is the "up" group).
+
+```{r three GO, message=FALSE, echo=FALSE}
+#fitting glm and preparing data for GO
+#getting entrez id from biomart using ensembl id, necessary for running GO
+#mart var assigned earlier in script 
+genes <- getBM(
+  filters="ensembl_gene_id",
+  attributes=c("ensembl_gene_id", "entrezgene_id"),
+  values=rownames(GenewiseCounts),
+  mart=mart)
+
+#swapping entrez id in for ensembl id
+EntGenewiseCounts <- cbind(GenewiseCounts, genes$entrezgene_id)
+#removing rows where entrez ID is NA, cannot run GO unless an entrez id exists
+EntGenewiseCounts <- na.omit(EntGenewiseCounts)
+#removing duplicate entrez IDs
+entrezCountsUnique <- EntGenewiseCounts[!duplicated(EntGenewiseCounts[,ncol(EntGenewiseCounts)]),]
+#setting row names as entrez ID rather than ensembl ID
+row.names(entrezCountsUnique) <- entrezCountsUnique[,ncol(entrezCountsUnique)]
+#removing entrez ID from the last column as it is now the row name
+entrezCountsUnique <- entrezCountsUnique[,1:ncol(entrezCountsUnique)-1]
+
+#####Setting DGE list for GO
+GO_dge.er <- DGEList(counts=entrezCountsUnique)
+
+#looking at number of genes in dge variable
+GO_dge.er <- calcNormFactors(GO_dge.er)
+
+#getting dispersions
+#using same design.er as created earlier
+GO_dge.er <- estimateGLMCommonDisp(GO_dge.er, design.er)
+GO_dge.er <- estimateGLMTrendedDisp(GO_dge.er, design.er)
+GO_dge.er <- estimateGLMTagwiseDisp(GO_dge.er, design.er)
+
+#fitting linear model
+GO_fit.er <- glmFit(GO_dge.er, design.er)
+```
+
+```{r three treat setting up GO, message=FALSE, echo=FALSE}
+if (group_num == 3) {
+  
+  #conducting likelihood ratio tests for each pairwise comparison
+  GO_A_vs_B_lrt <- glmLRT(GO_fit.er, contrast=contrasts[,"A_vs_B"])
+  GO_A_vs_C_lrt <- glmLRT(GO_fit.er, contrast=contrasts[,"A_vs_C"])
+  GO_B_vs_C_lrt <- glmLRT(GO_fit.er, contrast=contrasts[,"B_vs_C"])
+}
+```
+ 
+```{r two treat setting up GO, message=FALSE, echo=FALSE}
+if (group_num == 2) {
+  
+  #conducting likelihood ratio tests for each pairwise comparison
+  GO_A_vs_B_lrt <- glmLRT(GO_fit.er, contrast=contrasts[,"A_vs_B"])
+}
+``` 
+  
+```{r four treats setting up GO, message=FALSE, echo=FALSE}
+if (group_num == 4) {
+  
+  #conducting likelihood ratio tests for each pairwise comparison
+  GO_A_vs_B_lrt <- glmLRT(GO_fit.er, contrast=contrasts[,"A_vs_B"])
+  GO_A_vs_C_lrt <- glmLRT(GO_fit.er, contrast=contrasts[,"A_vs_C"])
+  GO_B_vs_C_lrt <- glmLRT(GO_fit.er, contrast=contrasts[,"B_vs_C"])
+  GO_A_vs_D_lrt <- glmLRT(GO_fit.er, contrast=contrasts[,"A_vs_D"])
+  GO_B_vs_D_lrt <- glmLRT(GO_fit.er, contrast=contrasts[,"B_vs_D"])
+  GO_C_vs_D_lrt <- glmLRT(GO_fit.er, contrast=contrasts[,"C_vs_D"])
+}
+```
+  
+```{r three treat GO A vs B, message=FALSE, echo=FALSE}
+if (group_num == 3) {
+  
+  print("group A vs group B")
+   
+  #print("Top 15 up: group A vs group B")
+  go_A_vs_B <- goana(GO_A_vs_B_lrt, FDR = 0.05, species="Ce")
+  go_A_vs_B_top15_u <- topGO(go_A_vs_B, n=15, sort="up")
+  knitr::kable(go_A_vs_B_top15_u, caption = "Top 15 up: group A vs group B")
+}
+```
+```{r three treat GO A vs B 2, message=FALSE, echo=FALSE}
+if (group_num == 3) {
+  #print("Top 15 down: group A vs group B")
+  go_A_vs_B_top15_d <- topGO(go_A_vs_B, n=15, sort="down")
+  knitr::kable(go_A_vs_B_top15_d, caption = "Top 15 down: group A vs group B")
+}
+```
+
+```{r two treat GO A vs B, message=FALSE, echo=FALSE}
+if (group_num == 2) {
+   
+  print("group A vs group B")
+  
+  go_A_vs_B <- goana(GO_A_vs_B_lrt, FDR = 0.05, species="Ce")
+  go_A_vs_B_top15_u <- topGO(go_A_vs_B, n=15, sort="up")
+  knitr::kable(go_A_vs_B_top15_u, caption = "Top 15 up: group A vs group B")
+}
+```
+```{r two treat GO A vs B 2, message=FALSE, echo=FALSE}
+if (group_num == 2) {
+  go_A_vs_B_top15_d <- topGO(go_A_vs_B, n=15, sort="down")
+  knitr::kable(go_A_vs_B_top15_d, caption = "Top 15 down: group A vs group B")
+}
+```
+
+```{r four treat GO A vs B, message=FALSE, echo=FALSE}
+if (group_num == 4) {
+   
+  print("group A vs group B")
+  
+  go_A_vs_B <- goana(GO_A_vs_B_lrt, FDR = 0.05, species="Ce")
+  go_A_vs_B_top15_u <- topGO(go_A_vs_B, n=15, sort="up")
+  knitr::kable(go_A_vs_B_top15_u, caption = "Top 15 up: group A vs group B")
+}
+```
+```{r four treat GO A vs B 2, message=FALSE, echo=FALSE}
+if (group_num == 4) {
+  #print("Top 15 down: group A vs group B")
+  go_A_vs_B_top15_d <- topGO(go_A_vs_B, n=15, sort="down")
+  knitr::kable(go_A_vs_B_top15_d, caption = "Top 15 down: group A vs group B")
+}
+```
+
+```{r GO analysis three treatA vs treatC, fig.height = 8, fig.width = 8, message=FALSE, echo=FALSE}
+if (group_num == 3) {
+
+  print("group A vs group C")
+  
+  go_A_vs_C <- goana(GO_A_vs_C_lrt, FDR = 0.05, species="Ce")
+  go_A_vs_C_top15_u <- topGO(go_A_vs_C, n=15, sort="up")
+  knitr::kable(go_A_vs_C_top15_u, caption = "Top 15 up: group A vs group C")
+}
+```
+```{r GO analysis three treatA vs treatC  2, fig.height = 8, fig.width = 8, message=FALSE, echo=FALSE}
+if (group_num == 3) {
+  go_A_vs_C_top15_d <- topGO(go_A_vs_C, n=15, sort="down")
+  knitr::kable(go_A_vs_C_top15_d, caption = "Top 15 down: group A vs group C")
+}
+```
+
+```{r GO analysis four treatA vs treatC, fig.height = 8, fig.width = 8, message=FALSE, echo=FALSE}
+if (group_num == 4) {
+
+  print("group A vs group C")
+  
+  go_A_vs_C <- goana(GO_A_vs_C_lrt, FDR = 0.05, species="Ce")
+  go_A_vs_C_top15_u <- topGO(go_A_vs_C, n=15, sort="up")
+  knitr::kable(go_A_vs_C_top15_u, caption = "Top 15 up: group A vs group C")
+}
+```
+```{r GO analysis four treatA vs treatC 2, fig.height = 8, fig.width = 8, message=FALSE, echo=FALSE}
+if (group_num == 4) {
+  print("Top 15 down: group A vs group C")
+  go_A_vs_C_top15_d <- topGO(go_A_vs_C, n=15, sort="down")
+  knitr::kable(go_A_vs_C_top15_d, caption = "Top 15 down: group A vs group C")
+}
+```
+
+```{r GO analysis three treatB vs treatC, fig.height = 8, fig.width = 8, message=FALSE, echo=FALSE}
+if (group_num == 3) {
+
+  print("group B vs group C")
+  
+  go_B_vs_C <- goana(GO_B_vs_C_lrt, FDR = 0.05, species="Ce")
+  go_B_vs_C_top15_u <- topGO(go_B_vs_C, n=15, sort="up")
+  knitr::kable(go_B_vs_C_top15_u, caption = "Top 15 up: group B vs group C")
+}
+```
+```{r GO analysis three treatB vs treatC 2, fig.height = 8, fig.width = 8, message=FALSE, echo=FALSE}
+if (group_num == 3) {
+  go_B_vs_C_top15_d <- topGO(go_B_vs_C, n=15, sort="down")
+  knitr::kable(go_B_vs_C_top15_d, caption = "Top 15 down: group B vs group C")
+}
+```
+
+```{r GO analysis four treatB vs treatC, fig.height = 8, fig.width = 8, message=FALSE, echo=FALSE}
+if (group_num == 4) {
+
+  print("group B vs group C")
+  
+  go_B_vs_C <- goana(GO_B_vs_C_lrt, FDR = 0.05, species="Ce")
+  go_B_vs_C_top15_u <- topGO(go_B_vs_C, n=15, sort="up")
+  knitr::kable(go_B_vs_C_top15_u, caption = "Top 15 up: group B vs group C")
+}
+```
+```{r GO analysis four treatB vs treatC 2, fig.height = 8, fig.width = 8, message=FALSE, echo=FALSE}
+if (group_num == 4) {
+  print("Top 15 down: group B vs group C")
+  go_B_vs_C_top15_d <- topGO(go_B_vs_C, n=15, sort="down")
+  knitr::kable(go_B_vs_C_top15_d, caption = "Top 15 down: group B vs group C")
+}
+```
+
+```{r GO analysis four treatA vs treatD, fig.height = 8, fig.width = 8, message=FALSE, echo=FALSE}
+if (group_num == 4) {
+
+  print("group A vs group D")
+  
+  go_A_vs_D <- goana(GO_A_vs_D_lrt, FDR = 0.05, species="Ce")
+  go_A_vs_D_top15_u <- topGO(go_A_vs_D, n=15, sort="up")
+  knitr::kable(go_A_vs_D_top15_u, caption = "Top 15 up: group A vs group D")
+}
+```
+```{r GO analysis four treatA vs treatD 2, fig.height = 8, fig.width = 8, message=FALSE, echo=FALSE}
+if (group_num == 4) {
+  go_A_vs_D_top15_d <- topGO(go_A_vs_D, n=15, sort="down")
+  knitr::kable(go_A_vs_D_top15_d, caption = "Top 15 down: group A vs group D")
+}
+```
+
+```{r GO analysis four treat B vs treatD, fig.height = 8, fig.width = 8, message=FALSE, echo=FALSE}
+if (group_num == 4) {
+
+  print("group B vs group D")
+  
+  go_B_vs_D <- goana(GO_B_vs_D_lrt, FDR = 0.05, species="Ce")
+  go_B_vs_D_top15_u <- topGO(go_B_vs_D, n=15, sort="up")
+  knitr::kable(go_B_vs_D_top15_u, caption = "Top 15 up: group B vs group D")
+}
+```
+```{r GO analysis four treat B vs treatD 2, fig.height = 8, fig.width = 8, message=FALSE, echo=FALSE}
+if (group_num == 4) {
+  go_B_vs_D_top15_d <- topGO(go_B_vs_D, n=15, sort="down")
+  knitr::kable(go_B_vs_D_top15_d, caption = "Top 15 down: group B vs group D")
+}
+```
+
+```{r GO analysis four treat C vs treat D, fig.height = 8, fig.width = 8, message=FALSE, echo=FALSE}
+if (group_num == 4) {
+
+  print("group C vs group D")
+  
+  go_C_vs_D <- goana(GO_C_vs_D_lrt, FDR = 0.05, species="Ce")
+  go_C_vs_D_top15_u <- topGO(go_C_vs_D, n=15, sort="up")
+  knitr::kable(go_C_vs_D_top15_u, caption = "Top 15 up: group C vs group D")
+}
+```
+```{r GO analysis four treat C vs treat D 2, fig.height = 8, fig.width = 8, message=FALSE, echo=FALSE}
+if (group_num == 4) {
+  go_C_vs_D_top15_d <- topGO(go_C_vs_D, n=15, sort="down")
+  knitr::kable(go_C_vs_D_top15_d, caption = "Top 15 down: group C vs group D")
+}
+```
